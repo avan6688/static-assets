@@ -33,13 +33,11 @@ jobs:
           setTimeout(()=>{window.__done={canHls:v.canPlayType('application/vnd.apple.mpegurl'),readyState:v.readyState,networkState:v.networkState,currentTime:v.currentTime,error:v.error?v.error.code:null,duration:v.duration,events:window.__ev};L('DONE ct='+v.currentTime+' rs='+v.readyState+' err='+(v.error?v.error.code:'none'))},9000);
           </script></body></html>
           HTML
-      - name: Serve test page
-        run: |
-          cd /tmp/site && nohup python3 -m http.server 8000 >/tmp/http.log 2>&1 &
-          sleep 2
-          curl -s -o /dev/null -w "local server: %{http_code}\n" http://localhost:8000/test.html
       - name: Run Safari HLS test
         run: |
+          cd /tmp/site && python3 -m http.server 8000 >/tmp/http.log 2>&1 &
+          sleep 3
+          curl -s -o /dev/null -w "local server: %{http_code}\n" http://localhost:8000/test.html
           python3 - <<'PY'
           from selenium import webdriver
           import time, json, urllib.parse, os
