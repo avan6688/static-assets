@@ -1,0 +1,63 @@
+name: ios-hls-test
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'JSON dict name->m3u8 url'
+        required: false
+        default: '{}'
+jobs:
+  safari-hls:
+    runs-on: macos-latest
+    steps:
+      - name: Enable safaridriver
+        run: sudo safaridriver --enable
+      - name: Install selenium
+        run: pip3 install --quiet selenium || pip3 install --quiet --break-system-packages selenium
+      - name: Write test page
+        run: |
+          cat > /tmp/test.html <<'HTML'
+          <!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#111">
+          <video id="v" muted playsinline autoplay style="width:360px;display:block"></video>
+          <pre id="log" style="color:#0f0;font-size:20px"></pre>
+          <script>
+          const v=document.getElementById('v');
+          const U=new URLSearchParams(location.search);
+          const L=(m)=>{document.getElementById('log').textContent+=m+"\n"};
+          window.__ev=[];
+          ['loadstart','loadedmetadata','loadeddata','canplay','playing','waiting','stalled','error','abort'].forEach(e=>v.addEventListener(e,()=>{window.__ev.push(e); if(e==='error'&&v.error)window.__ev.push('errcode='+v.error.code)}));
+          L('canPlayHLS='+v.canPlayType('application/vnd.apple.mpegurl'));
+          v.src=U.get('src');
+          v.play().then(()=>L('play() ok')).catch(e=>L('play() rej '+e));
+          setTimeout(()=>{window.__done={canHls:v.canPlayType('application/vnd.apple.mpegurl'),readyState:v.readyState,networkState:v.networkState,currentTime:v.currentTime,error:v.error?v.error.code:null,duration:v.duration,events:window.__ev};L('DONE ct='+v.currentTime+' rs='+v.readyState+' err='+(v.error?v.error.code:'none'))},9000);
+          </script></body></html>
+          HTML
+      - name: Run Safari HLS test
+        run: |
+          python3 - <<'PY'
+          from selenium import webdriver
+          import time, json, urllib.parse, os
+          tests = json.loads(os.environ.get('TEST_URLS') or '{}')
+          if not tests:
+            tests = {
+              "A_short_baseline": "https://videoaksgljlaaoigfjkia.com/videos/short_ae71fc39e9f3c018f4e96364e5d2172f/index.m3u8",
+              "B_community_fixed": "https://videoaksgljlaaoigfjkia.com/videos/community_cbb31ca384a0f0f3837b3d9583ad9007/index.m3u8",
+            }
+          d = webdriver.Safari()
+          d.set_window_size(520, 1000)
+          for name, url in tests.items():
+            page = "file:///tmp/test.html?src=" + urllib.parse.quote(url, safe='')
+            d.get(page)
+            time.sleep(11)
+            res = d.execute_script("return window.__done || {note:'no-result'}")
+            print("RESULT", name, json.dumps(res))
+            d.save_screenshot("/tmp/%s.png" % name)
+          d.quit()
+          PY
+        env:
+          TEST_URLS: ${{ github.event.inputs.urls }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: safari-shots
+          path: /tmp/*.png
