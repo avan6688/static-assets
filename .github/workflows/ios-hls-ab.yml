@@ -1,0 +1,63 @@
+name: ios-hls-ab
+on:
+  workflow_dispatch:
+jobs:
+  safari-ab:
+    runs-on: macos-latest
+    steps:
+      - name: Enable safaridriver
+        run: sudo safaridriver --enable
+      - name: Install selenium
+        run: pip3 install --quiet selenium || pip3 install --quiet --break-system-packages selenium
+      - name: Build test page + A/B m3u8 variants
+        run: |
+          mkdir -p /tmp/site
+          BASE="https://videoaksgljlaaoigfjkia.com/videos/community_cbb31ca384a0f0f3837b3d9583ad9007"
+          # 拉当前m3u8, 分片相对->绝对(供localhost托管的Safari取)
+          curl -s "$BASE/index.m3u8" | sed -E "s#^seg_#$BASE/seg_#" > /tmp/site/abs.m3u8
+          # 修复版(TD=11, 当前值) 与 原始版(强制TD=10) 两个变体
+          cp /tmp/site/abs.m3u8 /tmp/site/fixed_td11.m3u8
+          sed -E 's/#EXT-X-TARGETDURATION:[0-9]+/#EXT-X-TARGETDURATION:10/' /tmp/site/abs.m3u8 > /tmp/site/orig_td10.m3u8
+          echo "=== fixed head ==="; head -7 /tmp/site/fixed_td11.m3u8
+          echo "=== orig head ==="; head -7 /tmp/site/orig_td10.m3u8
+          cat > /tmp/site/test.html <<'HTML'
+          <!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#111">
+          <video id="v" muted playsinline autoplay style="width:340px;display:block"></video>
+          <pre id="log" style="color:#0f0;font-size:22px"></pre>
+          <script>
+          const v=document.getElementById('v'), U=new URLSearchParams(location.search);
+          const L=(m)=>{document.getElementById('log').textContent+=m+"\n"};
+          window.__ev=[];
+          ['loadedmetadata','canplay','playing','waiting','stalled','error'].forEach(e=>v.addEventListener(e,()=>{window.__ev.push(e);if(e==='error'&&v.error)window.__ev.push('errcode='+v.error.code)}));
+          L('canPlayHLS='+v.canPlayType('application/vnd.apple.mpegurl'));
+          v.src=U.get('src');
+          v.play().then(()=>L('play ok')).catch(e=>L('play rej '+e));
+          setTimeout(()=>{window.__done={rs:v.readyState,ct:v.currentTime,err:v.error?v.error.code:null,dur:v.duration,ev:window.__ev};L('DONE ct='+v.currentTime.toFixed(2)+' rs='+v.readyState+' err='+(v.error?v.error.code:'none'))},10000);
+          </script></body></html>
+          HTML
+      - name: Run Safari A/B
+        run: |
+          cd /tmp/site && python3 -m http.server 8000 >/tmp/http.log 2>&1 &
+          sleep 3
+          curl -s -o /dev/null -w "server:%{http_code}\n" http://localhost:8000/test.html
+          python3 - <<'PY'
+          from selenium import webdriver
+          import time, json, urllib.parse
+          tests = {
+            "1_short_ok":   "https://videoaksgljlaaoigfjkia.com/videos/short_ae71fc39e9f3c018f4e96364e5d2172f/index.m3u8",
+            "2_orig_TD10":  "http://localhost:8000/orig_td10.m3u8",
+            "3_fixed_TD11": "http://localhost:8000/fixed_td11.m3u8",
+          }
+          d = webdriver.Safari(); d.set_window_size(520,1000)
+          for name,url in tests.items():
+            d.get("http://localhost:8000/test.html?src="+urllib.parse.quote(url,safe=''))
+            time.sleep(12)
+            print("RESULT", name, json.dumps(d.execute_script("return window.__done||{note:'none'}")))
+            d.save_screenshot("/tmp/%s.png"%name)
+          d.quit()
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ab-shots
+          path: /tmp/*.png
