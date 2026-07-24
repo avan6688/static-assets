@@ -16,7 +16,8 @@ jobs:
         run: pip3 install --quiet selenium || pip3 install --quiet --break-system-packages selenium
       - name: Write test page
         run: |
-          cat > /tmp/test.html <<'HTML'
+          mkdir -p /tmp/site
+          cat > /tmp/site/test.html <<'HTML'
           <!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#111">
           <video id="v" muted playsinline autoplay style="width:360px;display:block"></video>
           <pre id="log" style="color:#0f0;font-size:20px"></pre>
@@ -32,6 +33,11 @@ jobs:
           setTimeout(()=>{window.__done={canHls:v.canPlayType('application/vnd.apple.mpegurl'),readyState:v.readyState,networkState:v.networkState,currentTime:v.currentTime,error:v.error?v.error.code:null,duration:v.duration,events:window.__ev};L('DONE ct='+v.currentTime+' rs='+v.readyState+' err='+(v.error?v.error.code:'none'))},9000);
           </script></body></html>
           HTML
+      - name: Serve test page
+        run: |
+          cd /tmp/site && nohup python3 -m http.server 8000 >/tmp/http.log 2>&1 &
+          sleep 2
+          curl -s -o /dev/null -w "local server: %{http_code}\n" http://localhost:8000/test.html
       - name: Run Safari HLS test
         run: |
           python3 - <<'PY'
@@ -46,7 +52,7 @@ jobs:
           d = webdriver.Safari()
           d.set_window_size(520, 1000)
           for name, url in tests.items():
-            page = "file:///tmp/test.html?src=" + urllib.parse.quote(url, safe='')
+            page = "http://localhost:8000/test.html?src=" + urllib.parse.quote(url, safe='')
             d.get(page)
             time.sleep(11)
             res = d.execute_script("return window.__done || {note:'no-result'}")
