@@ -1,0 +1,163 @@
+name: ios-shorts-video-probe
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'shorts page URL to test'
+        required: false
+        default: 'https://xiaohuangren1088.com/shorts'
+jobs:
+  ios-sim-safari:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: List Xcode / runtimes
+        run: |
+          xcodebuild -version || true
+          xcrun simctl list runtimes | grep -i ios || true
+      - name: Pick + boot an iPhone simulator
+        id: sim
+        run: |
+          python3 - <<'PY'
+          import json,subprocess,os
+          j=json.loads(subprocess.check_output(["xcrun","simctl","list","devices","available","--json"]).decode())
+          best=None
+          for rt,devs in j["devices"].items():
+            if "iOS" not in rt: continue
+            ver=rt.split("iOS-")[-1].replace("-",".") if "iOS-" in rt else ""
+            for d in devs:
+              n=d["name"]
+              if n.startswith("iPhone"):
+                best=(rt,ver,d["udid"],n)
+          rt,ver,udid,name=best
+          print("PICKED",name,ver,udid)
+          with open(os.environ["GITHUB_OUTPUT"],"a") as f:
+            f.write(f"udid={udid}\nver={ver}\ndname={name}\n")
+          PY
+      - name: Boot chosen udid
+        run: |
+          echo "booting ${{ steps.sim.outputs.udid }} (${{ steps.sim.outputs.dname }} iOS ${{ steps.sim.outputs.ver }})"
+          xcrun simctl boot "${{ steps.sim.outputs.udid }}" || true
+          xcrun simctl bootstatus "${{ steps.sim.outputs.udid }}" -b || true
+      - name: Install Appium + xcuitest
+        run: |
+          npm i -g appium@latest
+          appium driver install xcuitest
+          pip3 install --quiet Appium-Python-Client selenium || pip3 install --quiet --break-system-packages Appium-Python-Client selenium
+      - name: Start Appium server
+        run: |
+          appium --base-path /wd/hub --log-timestamp > /tmp/appium.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -s http://127.0.0.1:4723/wd/hub/status && break || sleep 2
+          done
+          echo ""
+      - name: Run iOS Safari video-metrics probe
+        env:
+          TEST_URL: ${{ github.event.inputs.url }}
+          SIM_UDID: ${{ steps.sim.outputs.udid }}
+          SIM_VER: ${{ steps.sim.outputs.ver }}
+          SIM_NAME: ${{ steps.sim.outputs.dname }}
+        run: |
+          python3 - <<'PY'
+          import time,json,os
+          from appium import webdriver
+          from appium.options.ios import XCUITestOptions
+          url=os.environ["TEST_URL"]
+          opts=XCUITestOptions()
+          opts.platform_name="iOS"
+          opts.automation_name="XCUITest"
+          opts.browser_name="Safari"
+          opts.udid=os.environ["SIM_UDID"]
+          opts.device_name=os.environ["SIM_NAME"]
+          opts.platform_version=os.environ["SIM_VER"]
+          opts.set_capability("appium:noReset",True)
+          opts.set_capability("appium:newCommandTimeout",300)
+          opts.set_capability("appium:wdaLaunchTimeout",240000)
+          opts.set_capability("appium:safariInitialUrl",url)
+          opts.set_capability("appium:webviewConnectTimeout",120000)
+          opts.set_capability("appium:webviewConnectRetries",20)
+          opts.set_capability("appium:safariIgnoreWebHostnames","")
+          opts.set_capability("appium:includeSafariInWebviews",True)
+          print("connecting appium...",flush=True)
+          d=None; last=None
+          for attempt in range(3):
+            try:
+              d=webdriver.Remote("http://127.0.0.1:4723/wd/hub",options=opts); break
+            except Exception as e:
+              last=e; print("session attempt",attempt,"failed:",str(e)[:180],flush=True); time.sleep(10)
+          if d is None: raise last
+          try:
+            d.get(url)
+            probe_js=r"""
+            var vids=[].slice.call(document.querySelectorAll('video'));
+            function pick(){
+              // prefer a playing/currentTime>0 video, else the largest one, else first
+              var best=null;
+              vids.forEach(function(v){
+                if(!best) best=v;
+                if(v.currentTime>0 && (!best||best.currentTime<=0)) best=v;
+              });
+              return best;
+            }
+            var v=pick();
+            function anc(el){
+              var out=[]; var n=el?el.parentElement:null; var i=0;
+              while(n && i<8){ var cs=getComputedStyle(n); var r=n.getBoundingClientRect();
+                out.push({tag:n.tagName+'.'+(n.className||'').toString().slice(0,24),
+                  pos:cs.position, transform:(cs.transform&&cs.transform!=='none')?cs.transform.slice(0,30):'none',
+                  overflow:cs.overflow, opacity:cs.opacity, zIndex:cs.zIndex,
+                  rw:Math.round(r.width), rh:Math.round(r.height), rt:Math.round(r.top)});
+                n=n.parentElement; i++; }
+              return out;
+            }
+            var res={href:location.href, innerW:window.innerWidth, innerH:window.innerHeight,
+                     dpr:window.devicePixelRatio, videoCount:vids.length};
+            if(v){ var cs=getComputedStyle(v); var r=v.getBoundingClientRect();
+              res.video={
+                videoWidth:v.videoWidth, videoHeight:v.videoHeight,
+                readyState:v.readyState, networkState:v.networkState,
+                paused:v.paused, ended:v.ended, muted:v.muted,
+                currentTime:Math.round((v.currentTime||0)*100)/100,
+                duration:Math.round((v.duration||0)*100)/100,
+                error:v.error?v.error.code:null,
+                srcTail:(v.currentSrc||v.src||'').slice(-40),
+                objectFit:cs.objectFit, opacity:cs.opacity, visibility:cs.visibility,
+                display:cs.display, transform:(cs.transform!=='none')?cs.transform.slice(0,30):'none',
+                zIndex:cs.zIndex,
+                rectX:Math.round(r.x), rectY:Math.round(r.y),
+                rectW:Math.round(r.width), rectH:Math.round(r.height)
+              };
+              res.ancestors=anc(v);
+            }
+            return res;
+            """
+            info=None
+            for i in range(30):
+              try: info=d.execute_script(probe_js)
+              except Exception as e: info={"probe_err":str(e)[:120]}
+              vd=(info or {}).get("video") or {}
+              if vd.get("currentTime",0)>0 or vd.get("videoWidth",0)>0: break
+              time.sleep(2)
+            print("VIDEO_PROBE", json.dumps(info,ensure_ascii=False),flush=True)
+            d.get_screenshot_as_file("/tmp/shorts_prod.png")
+            time.sleep(4)
+            try:
+              info2=d.execute_script(probe_js)
+              print("VIDEO_PROBE_2", json.dumps(info2,ensure_ascii=False),flush=True)
+            except Exception as e:
+              print("probe2 err",str(e)[:120],flush=True)
+            d.get_screenshot_as_file("/tmp/shorts_prod_2.png")
+          finally:
+            try: d.quit()
+            except: pass
+          PY
+      - name: Appium log tail
+        if: always()
+        run: tail -40 /tmp/appium.log || true
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-video-probe-shots
+          path: /tmp/*.png
+          if-no-files-found: warn
