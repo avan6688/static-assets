@@ -75,9 +75,22 @@ jobs:
           opts.set_capability("appium:noReset",True)
           opts.set_capability("appium:newCommandTimeout",300)
           opts.set_capability("appium:wdaLaunchTimeout",240000)
-          opts.set_capability("appium:safariInitialUrl","about:blank")
+          opts.set_capability("appium:safariInitialUrl",url)
+          opts.set_capability("appium:webviewConnectTimeout",120000)
+          opts.set_capability("appium:webviewConnectRetries",20)
+          opts.set_capability("appium:safariIgnoreWebHostnames","")
+          opts.set_capability("appium:includeSafariInWebviews",True)
           print("connecting appium...",flush=True)
-          d=webdriver.Remote("http://127.0.0.1:4723/wd/hub",options=opts)
+          d=None
+          last=None
+          for attempt in range(3):
+            try:
+              d=webdriver.Remote("http://127.0.0.1:4723/wd/hub",options=opts)
+              break
+            except Exception as e:
+              last=e; print("session attempt",attempt,"failed:",str(e)[:180],flush=True); time.sleep(10)
+          if d is None:
+            raise last
           try:
             d.get(url)
             # wait for shorts desc to render
