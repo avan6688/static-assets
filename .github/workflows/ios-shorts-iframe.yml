@@ -125,10 +125,15 @@ jobs:
             print("PROBE_"+tag, json.dumps(info,ensure_ascii=False),flush=True)
             d.get_screenshot_as_file("/tmp/%s.png"%tag)
 
+          def direct(url,tag):
+            d.get(url); time.sleep(6); dismiss_native(); time.sleep(12)
+            d.get_screenshot_as_file("/tmp/%s.png"%tag)
+            print("DIRECT_"+tag, flush=True)
+          # same-site confound killer: prod direct (non-iframe) vs prod iframe
+          direct(prod,"PRODdirect")
           load(prod,"BEFORE_prod_iframe")
+          direct(test,"TESTdirect")
           load(test,"AFTER_test_iframe")
-          # also a direct (non-iframe) test-env shot for reference
-          d.get(test); time.sleep(12); d.get_screenshot_as_file("/tmp/REF_test_direct.png")
           try: d.quit()
           except: pass
           PY
