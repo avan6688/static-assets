@@ -1,0 +1,144 @@
+name: ios-shorts-inflation
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'shorts page URL to test'
+        required: false
+        default: 'https://xhrqa72.top/shorts'
+jobs:
+  ios-sim-safari:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: List Xcode / runtimes
+        run: |
+          xcodebuild -version || true
+          xcrun simctl list runtimes | grep -i ios || true
+      - name: Pick + boot an iPhone simulator
+        id: sim
+        run: |
+          python3 - <<'PY'
+          import json,subprocess,os
+          j=json.loads(subprocess.check_output(["xcrun","simctl","list","devices","available","--json"]).decode())
+          best=None
+          for rt,devs in j["devices"].items():
+            if "iOS" not in rt: continue
+            ver=rt.split("iOS-")[-1].replace("-",".") if "iOS-" in rt else ""
+            for d in devs:
+              n=d["name"]
+              if n.startswith("iPhone"):
+                score=(1 if "1" in n else 0, d.get("isAvailable",True))
+                best=(rt,ver,d["udid"],n)
+          # prefer a plain "iPhone 1x" newest; just take last iPhone found
+          rt,ver,udid,name=best
+          print("PICKED",name,ver,udid)
+          with open(os.environ["GITHUB_OUTPUT"],"a") as f:
+            f.write(f"udid={udid}\nver={ver}\ndname={name}\n")
+          PY
+      - name: Boot chosen udid
+        run: |
+          echo "booting ${{ steps.sim.outputs.udid }} (${{ steps.sim.outputs.dname }} iOS ${{ steps.sim.outputs.ver }})"
+          xcrun simctl boot "${{ steps.sim.outputs.udid }}" || true
+          xcrun simctl bootstatus "${{ steps.sim.outputs.udid }}" -b || true
+      - name: Install Appium + xcuitest
+        run: |
+          npm i -g appium@latest
+          appium driver install xcuitest
+          pip3 install --quiet Appium-Python-Client selenium || pip3 install --quiet --break-system-packages Appium-Python-Client selenium
+      - name: Start Appium server
+        run: |
+          appium --base-path /wd/hub --log-timestamp > /tmp/appium.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -s http://127.0.0.1:4723/wd/hub/status && break || sleep 2
+          done
+          echo ""
+      - name: Run iOS Safari text-inflation test
+        env:
+          TEST_URL: ${{ github.event.inputs.url }}
+          SIM_UDID: ${{ steps.sim.outputs.udid }}
+          SIM_VER: ${{ steps.sim.outputs.ver }}
+          SIM_NAME: ${{ steps.sim.outputs.dname }}
+        run: |
+          python3 - <<'PY'
+          import time,json,os
+          from appium import webdriver
+          from appium.options.ios import XCUITestOptions
+          url=os.environ["TEST_URL"]
+          opts=XCUITestOptions()
+          opts.platform_name="iOS"
+          opts.automation_name="XCUITest"
+          opts.browser_name="Safari"
+          opts.udid=os.environ["SIM_UDID"]
+          opts.device_name=os.environ["SIM_NAME"]
+          opts.platform_version=os.environ["SIM_VER"]
+          opts.set_capability("appium:noReset",True)
+          opts.set_capability("appium:newCommandTimeout",300)
+          opts.set_capability("appium:wdaLaunchTimeout",240000)
+          opts.set_capability("appium:safariInitialUrl","about:blank")
+          print("connecting appium...",flush=True)
+          d=webdriver.Remote("http://127.0.0.1:4723/wd/hub",options=opts)
+          try:
+            d.get(url)
+            # wait for shorts desc to render
+            desc_js=r"""
+            var nodes=[].slice.call(document.querySelectorAll('.item-desc .description'));
+            var withText=nodes.filter(function(n){return (n.innerText||'').trim().length>0;});
+            var names=[].slice.call(document.querySelectorAll('.item-desc .name'));
+            function m(el){ if(!el) return null; var cs=getComputedStyle(el); var r=el.getBoundingClientRect();
+              return {fontSize:cs.fontSize, lineHeight:cs.lineHeight,
+                      tsa:(cs.webkitTextSizeAdjust||cs.textSizeAdjust||'n/a'),
+                      rectW:Math.round(r.width), rectH:Math.round(r.height),
+                      text:(el.innerText||'').slice(0,24)}; }
+            return {href:location.href, title:document.title,
+                    innerW:window.innerWidth, dpr:window.devicePixelRatio,
+                    descCount:nodes.length, descWithText:withText.length,
+                    desc:m(withText[0]||nodes[0]), name:m(names[0])};
+            """
+            info=None
+            for i in range(30):
+              info=d.execute_script(desc_js)
+              if info and info.get("descWithText",0)>0: break
+              time.sleep(2)
+            print("STATE_A_SHIPPED", json.dumps(info,ensure_ascii=False),flush=True)
+            d.get_screenshot_as_file("/tmp/A_shipped.png")
+
+            # B: force text-size-adjust:auto on .shorts-page => re-enable iOS inflation (pre-fix behavior)
+            inject=r"""
+            var old=document.getElementById('killtsa'); if(old)old.remove();
+            var s=document.createElement('style'); s.id='killtsa';
+            s.textContent='.shorts-page{-webkit-text-size-adjust:auto !important;text-size-adjust:auto !important;}';
+            document.head.appendChild(s);
+            document.body.offsetHeight; // force reflow
+            return true;
+            """
+            d.execute_script(inject)
+            time.sleep(3)
+            infoB=d.execute_script(desc_js)
+            print("STATE_B_AUTO", json.dumps(infoB,ensure_ascii=False),flush=True)
+            d.get_screenshot_as_file("/tmp/B_auto_inflation.png")
+
+            # verdict
+            def num(x):
+              try:return float(str(x).replace('px',''))
+              except:return None
+            a=(info or {}).get('desc') or {}; b=(infoB or {}).get('desc') or {}
+            print("VERDICT", json.dumps({
+              "shipped_fontSize":a.get('fontSize'),"auto_fontSize":b.get('fontSize'),
+              "shipped_rectH":a.get('rectH'),"auto_rectH":b.get('rectH'),
+              "shipped_tsa":a.get('tsa'),"auto_tsa":b.get('tsa'),
+            },ensure_ascii=False),flush=True)
+          finally:
+            try: d.quit()
+            except: pass
+          PY
+      - name: Appium log tail (on any outcome)
+        if: always()
+        run: tail -40 /tmp/appium.log || true
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-shorts-shots
+          path: /tmp/*.png
+          if-no-files-found: warn
