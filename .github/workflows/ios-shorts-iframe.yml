@@ -1,0 +1,147 @@
+name: ios-shorts-iframe
+on:
+  workflow_dispatch:
+    inputs:
+      prod:
+        description: 'production (unfixed) shorts url'
+        required: false
+        default: 'https://xiaohuangren1088.com/shorts'
+      test:
+        description: 'test (fixed) shorts url'
+        required: false
+        default: 'https://xhrqa72.top/shorts'
+jobs:
+  ios-sim-iframe:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Pick + boot iPhone simulator
+        id: sim
+        run: |
+          python3 - <<'PY'
+          import json,subprocess,os
+          j=json.loads(subprocess.check_output(["xcrun","simctl","list","devices","available","--json"]).decode())
+          best=None
+          for rt,devs in j["devices"].items():
+            if "iOS" not in rt: continue
+            ver=rt.split("iOS-")[-1].replace("-",".") if "iOS-" in rt else ""
+            for d in devs:
+              if d["name"].startswith("iPhone"): best=(rt,ver,d["udid"],d["name"])
+          rt,ver,udid,name=best
+          print("PICKED",name,ver,udid)
+          open(os.environ["GITHUB_OUTPUT"],"a").write(f"udid={udid}\nver={ver}\ndname={name}\n")
+          PY
+      - name: Boot
+        run: |
+          xcrun simctl boot "${{ steps.sim.outputs.udid }}" || true
+          xcrun simctl bootstatus "${{ steps.sim.outputs.udid }}" -b || true
+      - name: Install Appium + xcuitest
+        run: |
+          npm i -g appium@latest
+          appium driver install xcuitest
+          pip3 install --quiet Appium-Python-Client selenium || pip3 install --quiet --break-system-packages Appium-Python-Client selenium
+      - name: Start Appium
+        run: |
+          appium --base-path /wd/hub --log-timestamp > /tmp/appium.log 2>&1 &
+          for i in $(seq 1 30); do curl -s http://127.0.0.1:4723/wd/hub/status && break || sleep 2; done; echo ""
+      - name: Write outer iframe page + serve
+        run: |
+          mkdir -p /tmp/site
+          cat > /tmp/site/outer.html <<'HTML'
+          <!doctype html><html><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+          <title>landing-wrap</title>
+          <style>
+            html,body{margin:0;padding:0;height:100%;background:#e9457d;overflow:hidden}
+            /* 模拟落地页：整屏套一个 iframe 装 H5(iframe 内 viewport meta 被 iOS 忽略=生产真实条件) */
+            #f{display:block;border:0;width:100%;height:100%}
+          </style></head><body>
+          <iframe id="f" allow="autoplay" scrolling="no"></iframe>
+          <script>
+            var u=new URLSearchParams(location.search).get('child');
+            document.getElementById('f').src=u;
+          </script></body></html>
+          HTML
+          cd /tmp/site && python3 -m http.server 8000 >/tmp/http.log 2>&1 &
+          sleep 2
+          curl -s -o /dev/null -w "local outer: %{http_code}\n" "http://localhost:8000/outer.html"
+      - name: Run iframe A/B in iOS Safari
+        env:
+          PROD_URL: ${{ github.event.inputs.prod }}
+          TEST_URL: ${{ github.event.inputs.test }}
+          SIM_UDID: ${{ steps.sim.outputs.udid }}
+          SIM_VER: ${{ steps.sim.outputs.ver }}
+          SIM_NAME: ${{ steps.sim.outputs.dname }}
+        run: |
+          python3 - <<'PY'
+          import time,json,os,urllib.parse
+          from appium import webdriver
+          from appium.options.ios import XCUITestOptions
+          prod=os.environ["PROD_URL"]; test=os.environ["TEST_URL"]
+          opts=XCUITestOptions()
+          opts.platform_name="iOS"; opts.automation_name="XCUITest"; opts.browser_name="Safari"
+          opts.udid=os.environ["SIM_UDID"]; opts.device_name=os.environ["SIM_NAME"]; opts.platform_version=os.environ["SIM_VER"]
+          opts.set_capability("appium:noReset",True)
+          opts.set_capability("appium:newCommandTimeout",300)
+          opts.set_capability("appium:wdaLaunchTimeout",240000)
+          opts.set_capability("appium:safariInitialUrl","http://localhost:8000/outer.html")
+          opts.set_capability("appium:webviewConnectTimeout",120000)
+          opts.set_capability("appium:webviewConnectRetries",20)
+          d=None; last=None
+          for a in range(3):
+            try: d=webdriver.Remote("http://127.0.0.1:4723/wd/hub",options=opts); break
+            except Exception as e: last=e; print("sess attempt",a,str(e)[:150],flush=True); time.sleep(10)
+          if d is None: raise last
+
+          def dismiss_native():
+            try:
+              cur=d.current_context; d.switch_to.context('NATIVE_APP')
+              from appium.webdriver.common.appiumby import AppiumBy
+              for lbl in ['Close','Not Now','Continue','Dismiss','Done','No Thanks']:
+                els=d.find_elements(AppiumBy.ACCESSIBILITY_ID,lbl)
+                if els:
+                  try: els[0].click(); print("dismissed popup via",lbl,flush=True)
+                  except: pass
+                  break
+            except Exception as e: print("dismiss:",str(e)[:120],flush=True)
+            finally:
+              try: d.switch_to.context(cur)
+              except:
+                try: d.switch_to.context([c for c in d.contexts if c!='NATIVE_APP'][-1])
+                except: pass
+
+          def probe():
+            # cross-origin: can't read child styles, but confirm outer loaded + iframe sized
+            return d.execute_script("""
+              var f=document.getElementById('f');
+              var r=f?f.getBoundingClientRect():{};
+              return {title:document.title,href:location.href,innerW:window.innerWidth,
+                      childSrc:f?f.getAttribute('src'):null,
+                      iframeW:Math.round(r.width||0),iframeH:Math.round(r.height||0)};""")
+
+          def load(child,tag):
+            d.get("http://localhost:8000/outer.html?child="+urllib.parse.quote(child,safe=''))
+            time.sleep(6)
+            dismiss_native()
+            time.sleep(12)  # let child H5 fetch list + render ItemDesc
+            info=probe()
+            print("PROBE_"+tag, json.dumps(info,ensure_ascii=False),flush=True)
+            d.get_screenshot_as_file("/tmp/%s.png"%tag)
+
+          load(prod,"BEFORE_prod_iframe")
+          load(test,"AFTER_test_iframe")
+          # also a direct (non-iframe) test-env shot for reference
+          d.get(test); time.sleep(12); d.get_screenshot_as_file("/tmp/REF_test_direct.png")
+          try: d.quit()
+          except: pass
+          PY
+      - name: Appium log tail
+        if: always()
+        run: tail -30 /tmp/appium.log || true
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-iframe-shots
+          path: /tmp/*.png
+          if-no-files-found: warn
