@@ -44,8 +44,15 @@ jobs:
         run: |
           appium --base-path /wd/hub --log-timestamp > /tmp/appium.log 2>&1 &
           for i in $(seq 1 30); do curl -s http://127.0.0.1:4723/wd/hub/status && break || sleep 2; done; echo ""
-      - name: Write outer iframe page + serve
+      - name: Run iframe A/B in iOS Safari
+        env:
+          PROD_URL: ${{ github.event.inputs.prod }}
+          TEST_URL: ${{ github.event.inputs.test }}
+          SIM_UDID: ${{ steps.sim.outputs.udid }}
+          SIM_VER: ${{ steps.sim.outputs.ver }}
+          SIM_NAME: ${{ steps.sim.outputs.dname }}
         run: |
+          # outer landing wrapper + http server MUST be in same step as python (bg dies across steps)
           mkdir -p /tmp/site
           cat > /tmp/site/outer.html <<'HTML'
           <!doctype html><html><head><meta charset="utf-8">
@@ -53,7 +60,6 @@ jobs:
           <title>landing-wrap</title>
           <style>
             html,body{margin:0;padding:0;height:100%;background:#e9457d;overflow:hidden}
-            /* 模拟落地页：整屏套一个 iframe 装 H5(iframe 内 viewport meta 被 iOS 忽略=生产真实条件) */
             #f{display:block;border:0;width:100%;height:100%}
           </style></head><body>
           <iframe id="f" allow="autoplay" scrolling="no"></iframe>
@@ -63,16 +69,7 @@ jobs:
           </script></body></html>
           HTML
           cd /tmp/site && python3 -m http.server 8000 >/tmp/http.log 2>&1 &
-          sleep 2
-          curl -s -o /dev/null -w "local outer: %{http_code}\n" "http://localhost:8000/outer.html"
-      - name: Run iframe A/B in iOS Safari
-        env:
-          PROD_URL: ${{ github.event.inputs.prod }}
-          TEST_URL: ${{ github.event.inputs.test }}
-          SIM_UDID: ${{ steps.sim.outputs.udid }}
-          SIM_VER: ${{ steps.sim.outputs.ver }}
-          SIM_NAME: ${{ steps.sim.outputs.dname }}
-        run: |
+          for i in $(seq 1 15); do curl -s -o /dev/null "http://localhost:8000/outer.html" && { echo "outer up"; break; } || sleep 1; done
           python3 - <<'PY'
           import time,json,os,urllib.parse
           from appium import webdriver
