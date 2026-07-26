@@ -87,37 +87,46 @@ jobs:
           if d is None:
               raise last
 
+          BASE="http://127.0.0.1:8000/"
+          # (name, page, is_iframe) —— 测多个 context 找出真正激活 WebKit 文本放大的环境
+          contexts=[
+              ("devicewidth","ctx_devicewidth.html",False),
+              ("novp",       "ctx_novp.html",       False),
+              ("wide",       "ctx_wide.html",       False),
+              ("frame",      "ctx_frame.html",      True),
+          ]
           try:
               d.set_window_size(390, 844)
-              d.get("http://127.0.0.1:8000/inflation-ab.html")
-              time.sleep(3)
-              res=d.execute_script("return window.__measureAll();")
-              print("MEASURE", json.dumps(res, ensure_ascii=False), flush=True)
-
-              def h(k):
-                  try: return res[k]["rectH"]
-                  except: return None
-              def f(k):
-                  try: return res[k]["computedFontSize"]
-                  except: return None
-              verdict={
-                "innerW":res.get("innerW"),"dpr":res.get("dpr"),
-                "A_auto14_rectH":h("d_auto14"),"B_fix14_rectH":h("d_fix14"),
-                "A_auto14_font":f("d_auto14"),"B_fix14_font":f("d_fix14"),
-                "auto12_rectH":h("d_auto12"),"fix12_rectH":h("d_fix12"),
-                "auto16_rectH":h("d_auto16"),
-                "nowrap_rectH":h("d_nowrap"),
-                "inflation_reproduced": (h("d_auto14") or 0) > (h("d_fix14") or 0) + 4,
-              }
-              print("VERDICT", json.dumps(verdict, ensure_ascii=False), flush=True)
-
-              d.save_screenshot("/tmp/inflation_ab_full.png")
-              # 单独截 A（放大）与 B（正常）两块，便于并排看
-              try:
-                  a=d.find_element("id","auto14"); a.screenshot("/tmp/A_auto14_inflated.png")
-                  b=d.find_element("id","fix14"); b.screenshot("/tmp/B_fix14_normal.png")
-              except Exception as e:
-                  print("elem screenshot err:",str(e)[:200],flush=True)
+              any_repro=False
+              for name,page,is_frame in contexts:
+                  try:
+                      d.switch_to.default_content()
+                      d.get(BASE+page)
+                      time.sleep(3)
+                      if is_frame:
+                          d.switch_to.frame(d.find_element("id","kid"))
+                          time.sleep(1)
+                      res=d.execute_script("return window.__measureAll();")
+                  except Exception as e:
+                      print("CTX",name,"error:",str(e)[:200],flush=True); continue
+                  def h(k):
+                      try: return res[k]["rectH"]
+                      except: return None
+                  a14=h("d_auto14"); b14=h("d_fix14"); n14=h("d_none14")
+                  repro = (a14 or 0) > (b14 or 0) + 4
+                  any_repro = any_repro or repro
+                  print("MEASURE_%s"%name, json.dumps(res, ensure_ascii=False), flush=True)
+                  print("VERDICT_%s"%name, json.dumps({
+                      "innerW":res.get("innerW"),"docW":res.get("docW"),
+                      "A_auto14_rectH":a14,"B_fix14_rectH":b14,"none14_rectH":n14,
+                      "auto12_rectH":h("d_auto12"),"fix12_rectH":h("d_fix12"),
+                      "nowrap_rectH":h("d_nowrap"),
+                      "inflation_reproduced":repro,
+                  }, ensure_ascii=False), flush=True)
+                  # 全屏截图（iframe context 也截整页，能看到内部放大）
+                  d.switch_to.default_content()
+                  d.save_screenshot("/tmp/ctx_%s_full.png"%name)
+              print("ANY_REPRODUCED", any_repro, flush=True)
           finally:
               try: d.quit()
               except: pass
