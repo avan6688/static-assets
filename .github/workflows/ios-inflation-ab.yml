@@ -40,17 +40,29 @@ jobs:
       - name: Enable safaridriver + install selenium
         run: |
           sudo safaridriver --enable || true
-          pip3 install --quiet selenium || pip3 install --quiet --break-system-packages selenium
+          pip3 install --quiet --break-system-packages selenium || pip3 install --quiet selenium
+          python3 -c "import selenium; print('selenium', selenium.__version__)"
 
       - name: Serve page + run Safari (iOS Simulator) A/B inflation test
+        shell: bash
         env:
           SIM_UDID: ${{ steps.sim.outputs.udid }}
         run: |
+          set +e
+          echo "safaridriver version:"; safaridriver --version || true
           # 后台服务与 selenium 必须同一 step（跨 step 后台进程会被杀）
           cd "$GITHUB_WORKSPACE"
-          python3 -m http.server 8000 >/tmp/http.log 2>&1 &
-          sleep 2
-          curl -s -o /dev/null -w "http.server=%{http_code}\n" http://127.0.0.1:8000/inflation-ab.html
+          nohup python3 -m http.server 8000 --bind 127.0.0.1 >/tmp/http.log 2>&1 &
+          # readiness loop（最多 ~30s）
+          ok=0
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://127.0.0.1:8000/inflation-ab.html)
+            echo "probe $i http_code=$code"
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            sleep 1
+          done
+          echo "---- http.log ----"; cat /tmp/http.log || true
+          if [ "$ok" != "1" ]; then echo "HTTP server not ready, aborting"; exit 1; fi
 
           python3 - <<'PY'
           import time, json, os, sys
