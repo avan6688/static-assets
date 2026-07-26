@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>iOS text-inflation A/B repro (ssp-overlay desc)</title>
+<style>
+/* Shorts.vue 进页时把 html{font-size:1px}（rem 体系 1rem=1px），忠实还原 */
+html { font-size: 1px; }
+body { margin: 0; background:#111; color:#fff; font-family: -apple-system, "PingFang SC", sans-serif; }
+
+/* 每个 block 忠实复刻 ShortSearchPlayer .ssp-overlay 内 ItemDesc 的 .item-desc/.description 渲染环境：
+   .item-desc width:70%（≈262px @375）；.description line-height:1.4 word-break:break-word，
+   无 line-clamp / 无固定高 / white-space:normal → 窄块多行中文小字。
+   唯一变量 = 该 block 上的 text-size-adjust。 */
+.block { border:1px solid #444; margin:8px 0; padding:6px; }
+.label { font-size:11px; color:#8cf; -webkit-text-size-adjust:100%; text-size-adjust:100%; }
+.item-desc { width:70%; }
+.description {
+  line-height:1.4;
+  word-break:break-word;
+  font-size:14px;      /* = /shorts 实测 desc 14px（.description 无显式 font-size，继承 14px） */
+}
+
+/* ---- 唯一变量：text-size-adjust ---- */
+.tsa-auto { -webkit-text-size-adjust:auto;  text-size-adjust:auto; }   /* = 修复前 .ssp-overlay（无防护，默认 auto） */
+.tsa-100  { -webkit-text-size-adjust:100%;  text-size-adjust:100%; }   /* = 修复后 .ssp-overlay 加的防护 */
+.tsa-none { -webkit-text-size-adjust:none;  text-size-adjust:none; }
+
+.f12 .description { font-size:12px; }
+.f16 .description { font-size:16px; }
+
+/* 失活对照：命中 WebKit idempotent autosizing 的 disqualifier，应“即使 auto 也不放大” */
+.nowrap .description { white-space:nowrap; overflow:hidden; }
+.fixedh .description { height:20px; overflow:hidden; }
+</style>
+</head>
+<body>
+<!-- 多行中文 desc（约 50 字，与真实短视频文案量级一致；无 #话题 只用纯文本，专测放大） -->
+<div class="block tsa-auto"      id="auto14"><div class="label">A auto/14px（=修复前 ssp-overlay）</div><div class="item-desc"><div class="description" id="d_auto14">高颜值巨乳网红晨练私房大秀身材超话题今日份福利已送达记得点赞收藏关注不迷路更多精彩持续更新中</div></div></div>
+<div class="block tsa-100"       id="fix14"><div class="label">B 100%/14px（=修复后 ssp-overlay）</div><div class="item-desc"><div class="description" id="d_fix14">高颜值巨乳网红晨练私房大秀身材超话题今日份福利已送达记得点赞收藏关注不迷路更多精彩持续更新中</div></div></div>
+<div class="block tsa-none"      id="none14"><div class="label">C none/14px</div><div class="item-desc"><div class="description" id="d_none14">高颜值巨乳网红晨练私房大秀身材超话题今日份福利已送达记得点赞收藏关注不迷路更多精彩持续更新中</div></div></div>
+<div class="block tsa-auto f12"  id="auto12"><div class="label">A2 auto/12px</div><div class="item-desc"><div class="description" id="d_auto12">高颜值巨乳网红晨练私房大秀身材超话题今日份福利已送达记得点赞收藏关注不迷路更多精彩持续更新中</div></div></div>
+<div class="block tsa-100 f12"   id="fix12"><div class="label">B2 100%/12px</div><div class="item-desc"><div class="description" id="d_fix12">高颜值巨乳网红晨练私房大秀身材超话题今日份福利已送达记得点赞收藏关注不迷路更多精彩持续更新中</div></div></div>
+<div class="block tsa-auto f16"  id="auto16"><div class="label">A3 auto/16px</div><div class="item-desc"><div class="description" id="d_auto16">高颜值巨乳网红晨练私房大秀身材超话题今日份福利已送达记得点赞收藏关注不迷路更多精彩持续更新中</div></div></div>
+<div class="block tsa-auto nowrap" id="autonowrap"><div class="label">CTRL auto/nowrap（disqualifier，应不放大）</div><div class="item-desc"><div class="description" id="d_nowrap">高颜值巨乳网红晨练私房大秀身材超话题今日份福利已送达记得点赞收藏关注不迷路</div></div></div>
+
+<pre id="out" style="-webkit-text-size-adjust:100%;text-size-adjust:100%;font-size:11px;color:#0f0;white-space:pre-wrap;"></pre>
+<script>
+function measure(id){
+  var el=document.getElementById(id);
+  var cs=getComputedStyle(el);
+  var r=el.getBoundingClientRect();
+  return {computedFontSize:cs.fontSize, tsa:(cs.webkitTextSizeAdjust||cs.textSizeAdjust||'n/a'),
+          rectH:Math.round(r.height), rectW:Math.round(r.width),
+          lineHeight:cs.lineHeight};
+}
+window.__measureAll=function(){
+  var ids=['d_auto14','d_fix14','d_none14','d_auto12','d_fix12','d_auto16','d_nowrap'];
+  var res={innerW:window.innerWidth,dpr:window.devicePixelRatio,ua:navigator.userAgent};
+  ids.forEach(function(id){res[id]=measure(id);});
+  document.getElementById('out').textContent=JSON.stringify(res,null,1);
+  return res;
+};
+window.__measureAll();
+</script>
+</body>
+</html>

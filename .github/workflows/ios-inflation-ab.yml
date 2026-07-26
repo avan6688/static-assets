@@ -1,0 +1,120 @@
+name: ios-inflation-ab
+on:
+  workflow_dispatch: {}
+jobs:
+  ios-sim-safari:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Environment / runtimes
+        run: |
+          xcodebuild -version || true
+          which safaridriver || true
+          xcrun simctl list runtimes | grep -i ios || true
+          xcrun simctl list devices available | grep -i iphone || true
+
+      - name: Pick + boot an iPhone simulator
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available --json | python3 -c '
+          import json,sys
+          j=json.load(sys.stdin)["devices"]
+          best=None
+          for rt,devs in j.items():
+              if "iOS" not in rt: continue
+              for d in devs:
+                  if d["name"].startswith("iPhone"):
+                      best=(d["udid"],d["name"],rt)
+          print(best[0])
+          import sys as s
+          s.stderr.write("PICKED %s %s\n"%(best[1],best[2]))
+          ')
+          echo "PICKED udid=$UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b || true
+
+      - name: Enable safaridriver + install selenium
+        run: |
+          sudo safaridriver --enable || true
+          pip3 install --quiet selenium || pip3 install --quiet --break-system-packages selenium
+
+      - name: Serve page + run Safari (iOS Simulator) A/B inflation test
+        env:
+          SIM_UDID: ${{ steps.sim.outputs.udid }}
+        run: |
+          # 后台服务与 selenium 必须同一 step（跨 step 后台进程会被杀）
+          cd "$GITHUB_WORKSPACE"
+          python3 -m http.server 8000 >/tmp/http.log 2>&1 &
+          sleep 2
+          curl -s -o /dev/null -w "http.server=%{http_code}\n" http://127.0.0.1:8000/inflation-ab.html
+
+          python3 - <<'PY'
+          import time, json, os, sys
+          from selenium import webdriver
+          from selenium.webdriver.safari.options import Options
+
+          udid=os.environ["SIM_UDID"]
+          opts=Options()
+          # ---- 指向 iOS Simulator（不是 macOS 桌面 Safari）----
+          opts.set_capability("platformName","ios")
+          opts.set_capability("safari:useSimulator", True)
+          opts.set_capability("safari:deviceType", "iPhone")
+          opts.set_capability("safari:deviceUDID", udid)
+
+          d=None; last=None
+          for attempt in range(4):
+              try:
+                  d=webdriver.Safari(options=opts)
+                  break
+              except Exception as e:
+                  last=e; print("session attempt",attempt,"failed:",str(e)[:300],flush=True); time.sleep(6)
+          if d is None:
+              raise last
+
+          try:
+              d.set_window_size(390, 844)
+              d.get("http://127.0.0.1:8000/inflation-ab.html")
+              time.sleep(3)
+              res=d.execute_script("return window.__measureAll();")
+              print("MEASURE", json.dumps(res, ensure_ascii=False), flush=True)
+
+              def h(k):
+                  try: return res[k]["rectH"]
+                  except: return None
+              def f(k):
+                  try: return res[k]["computedFontSize"]
+                  except: return None
+              verdict={
+                "innerW":res.get("innerW"),"dpr":res.get("dpr"),
+                "A_auto14_rectH":h("d_auto14"),"B_fix14_rectH":h("d_fix14"),
+                "A_auto14_font":f("d_auto14"),"B_fix14_font":f("d_fix14"),
+                "auto12_rectH":h("d_auto12"),"fix12_rectH":h("d_fix12"),
+                "auto16_rectH":h("d_auto16"),
+                "nowrap_rectH":h("d_nowrap"),
+                "inflation_reproduced": (h("d_auto14") or 0) > (h("d_fix14") or 0) + 4,
+              }
+              print("VERDICT", json.dumps(verdict, ensure_ascii=False), flush=True)
+
+              d.save_screenshot("/tmp/inflation_ab_full.png")
+              # 单独截 A（放大）与 B（正常）两块，便于并排看
+              try:
+                  a=d.find_element("id","auto14"); a.screenshot("/tmp/A_auto14_inflated.png")
+                  b=d.find_element("id","fix14"); b.screenshot("/tmp/B_fix14_normal.png")
+              except Exception as e:
+                  print("elem screenshot err:",str(e)[:200],flush=True)
+          finally:
+              try: d.quit()
+              except: pass
+          PY
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-inflation-ab-shots
+          path: /tmp/*.png
+          if-no-files-found: warn
